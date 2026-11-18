@@ -3,7 +3,6 @@ package com.palmace.jkapk.engine.internal.resolve
 import com.palmace.jkapk.engine.BuildContext
 import com.palmace.jkapk.engine.BuildDiagnostic
 import com.palmace.jkapk.engine.BuildState
-import com.palmace.jkapk.engine.JavaVersion
 import com.palmace.jkapk.engine.LogLevel
 import com.palmace.jkapk.engine.ProjectConfig
 import com.palmace.jkapk.engine.internal.stage.DependencyResolverStage
@@ -21,7 +20,8 @@ class DependencyResolverStageTest {
     @TempDir
     lateinit var tmp: File
 
-    private fun fakeCtx(cacheDir: File): BuildContext = object : BuildContext {
+    private fun fakeCtx(config: ProjectConfig, cacheDir: File): BuildContext = object : BuildContext {
+        override val config = config
         override val workDir = File(tmp, "work").apply { mkdirs() }
         override val cacheDir = cacheDir
         override val nativeLibDir = File(tmp, "native").apply { mkdirs() }
@@ -76,11 +76,10 @@ class DependencyResolverStageTest {
         val cache = File(tmp, "cache").apply { mkdirs() }
         val stage = DependencyResolverStage()
 
-        val result = stage.execute(config, fakeCtx(cache))
+        val result = stage.execute(config, fakeCtx(config, cache))
 
-        // 1 jar plano + classes.jar extraído del aar = 2
         assertEquals(2, result.jars.size)
-        assertTrue(result.jars.all { it.exists() }, "Todos los jars deben existir")
+        assertTrue(result.jars.all { it.exists() })
         assertEquals(1, result.aarManifests.size)
     }
 
@@ -89,7 +88,7 @@ class DependencyResolverStageTest {
         val config = fakeConfig(emptyList())
         val cache = File(tmp, "cache").apply { mkdirs() }
 
-        val result = DependencyResolverStage().execute(config, fakeCtx(cache))
+        val result = DependencyResolverStage().execute(config, fakeCtx(config, cache))
 
         assertTrue(result.isEmpty)
     }

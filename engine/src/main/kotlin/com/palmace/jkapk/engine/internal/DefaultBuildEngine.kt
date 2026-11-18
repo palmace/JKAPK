@@ -42,19 +42,20 @@ internal class DefaultBuildEngine : BuildEngine {
         cacheDir.mkdirs()
 
         val ctx = DefaultBuildContext(
+            config = config,
             workDir = workDir,
             cacheDir = cacheDir,
             nativeLibDir = nativeLibDir,
             stateFlow = _state,
-            logger = { level, tag, msg -> /* TODO: hook al listener */ },
+            logger = { _, _, _ -> },
             diagnosticSink = { diagnostics.add(it) }
         )
         activeContext = ctx
 
         val stages = listOf(
             DependencyResolverStage(),
-            JavaCompilerStage(),
             KotlinCompilerStage(),
+            JavaCompilerStage(),
             Aapt2Stage(),
             DexStage(),
             PackageStage(),
