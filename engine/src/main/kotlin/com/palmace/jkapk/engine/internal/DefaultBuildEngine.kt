@@ -1,44 +1,122 @@
 package com.palmace.jkapk.engine.internal
 
-import com.palmace.jkapk.engine.*
+import com.palmace.jkapk.engine.BuildDiagnostic
+import com.palmace.jkapk.engine.BuildEngine
+import com.palmace.jkapk.engine.BuildResult
+import com.palmace.jkapk.engine.BuildState
+import com.palmace.jkapk.engine.BuildStage
+import com.palmace.jkapk.engine.LogLevel
+import com.palmace.jkapk.engine.ProjectConfig
+import com.palmace.jkapk.engine.Severity
+import com.palmace.jkapk.engine.internal.stage.Aapt2Stage
+import com.palmace.jkapk.engine.internal.stage.DependencyResolverStage
+import com.palmace.jkapk.engine.internal.stage.DexStage
+import com.palmace.jkapk.engine.internal.stage.JavaCompilerStage
+import com.palmace.jkapk.engine.internal.stage.KotlinCompilerStage
+import com.palmace.jkapk.engine.internal.stage.PackageStage
+import com.palmace.jkapk.engine.internal.stage.SignStage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.io.File
+import java.security.MessageDigest
 
 internal class DefaultBuildEngine : BuildEngine {
 
     private val _state = MutableStateFlow<BuildState>(BuildState.Idle)
     override val state: StateFlow<BuildState> = _state.asStateFlow()
 
-    private var cancelled = false
+    private var activeContext: DefaultBuildContext? = null
 
     override suspend fun build(config: ProjectConfig): BuildResult {
-        cancelled = false
         val start = System.currentTimeMillis()
-        _state.value = BuildState.Failed(
-            stage = BuildStage.RESOLVE,
-            diagnostics = listOf(
-                BuildDiagnostic(
-                    severity = Severity.ERROR,
-                    message = "DefaultBuildEngine aún no implementado (Fase 2).",
-                    stage = BuildStage.RESOLVE
-                )
+        val diagnostics = mutableListOf<BuildDiagnostic>()
+
+        val projectHash = hashOf(config.projectRoot.absolutePath)
+        val workDir = File(config.buildOutputDir, "work-$projectHash-${System.currentTimeMillis()}")
+        val cacheDir = File(config.buildOutputDir, "cache-$projectHash")
+        val nativeLibDir = File(config.projectRoot, "engine-native")
+
+        workDir.mkdirs()
+        cacheDir.mkdirs()
+
+        val ctx = DefaultBuildContext(
+            workDir = workDir,
+            cacheDir = cacheDir,
+            nativeLibDir = nativeLibDir,
+            stateFlow = _state,
+            logger = { level, tag, msg -> /* TODO: hook al listener */ },
+            diagnosticSink = { diagnostics.add(it) }
+        )
+        activeContext = ctx
+
+        val stages = listOf(
+            DependencyResolverStage(),
+            JavaCompilerStage(),
+            KotlinCompilerStage(),
+            Aapt2Stage(),
+            DexStage(),
+            PackageStage(),
+            SignStage()
+        )
+        val pipeline = Pipeline(stages)
+
+        return try {
+            pipeline.execute(config, ctx)
+
+            val apkPath = File(workDir, "${config.projectName}.apk")
+            val duration = System.currentTimeMillis() - start
+            _state.value = BuildState.Success(apkPath, duration, diagnostics.toList())
+            BuildResult(
+                success = true,
+                apk = apkPath,
+                diagnostics = diagnostics.toList(),
+                durationMs = duration
             )
-        )
-        return BuildResult(
-            success = false,
-            apk = null,
-            diagnostics = (state.value as BuildState.Failed).diagnostics,
-            durationMs = System.currentTimeMillis() - start
-        )
+        } catch (ce: CancellationException) {
+            _state.value = BuildState.Cancelled
+            BuildResult(
+                success = false,
+                apk = null,
+                diagnostics = diagnostics.toList(),
+                durationMs = System.currentTimeMillis() - start
+            )
+        } catch (t: Throwable) {
+            val failureDiag = BuildDiagnostic(
+                severity = Severity.ERROR,
+                message = "Fallo inesperado: ${t.message}",
+                stage = BuildStage.RESOLVE,
+                rawOutput = t.stackTraceToString()
+            )
+            diagnostics.add(failureDiag)
+            _state.value = BuildState.Failed(BuildStage.RESOLVE, diagnostics.toList(), t)
+            BuildResult(
+                success = false,
+                apk = null,
+                diagnostics = diagnostics.toList(),
+                durationMs = System.currentTimeMillis() - start
+            )
+        } finally {
+            activeContext = null
+        }
     }
 
     override fun cancel() {
-        cancelled = true
+        activeContext?.requestCancel()
         _state.value = BuildState.Cancelled
     }
 
     override suspend fun clean(config: ProjectConfig) {
-        // TODO Fase 2: borrar cacheDir del proyecto.
+        val projectHash = hashOf(config.projectRoot.absolutePath)
+        val cacheDir = File(config.buildOutputDir, "cache-$projectHash")
+        cacheDir.deleteRecursively()
+        _state.value = BuildState.Idle
+    }
+
+    private fun hashOf(input: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val bytes = digest.digest(input.toByteArray())
+        return bytes.take(8).joinToString("") { "%02x".format(it) }
     }
 }
