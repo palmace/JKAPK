@@ -28,5 +28,7 @@ data class ProjectConfig(
     val javaVersion: JavaVersion = JavaVersion.VERSION_17,
     val multidex: Boolean = true,
     val incremental: Boolean = true,
-    val buildOutputDir: File
+    val buildOutputDir: File,
+    val androidJar: File = File(""),
+    val aapt2Binary: File? = null
 )

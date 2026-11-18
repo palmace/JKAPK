@@ -52,11 +52,12 @@ internal class DefaultBuildEngine : BuildEngine {
         )
         activeContext = ctx
 
+        // Orden: Resolve -> AAPT2 -> Kotlin -> Java -> DEX -> Package -> Sign
         val stages = listOf(
             DependencyResolverStage(),
+            Aapt2Stage(),
             KotlinCompilerStage(),
             JavaCompilerStage(),
-            Aapt2Stage(),
             DexStage(),
             PackageStage(),
             SignStage()

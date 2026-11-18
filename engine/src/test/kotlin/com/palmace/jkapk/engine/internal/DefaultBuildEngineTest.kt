@@ -27,7 +27,7 @@ class DefaultBuildEngineTest {
         projectRoot = tmp,
         javaSourceDirs = listOf(File(tmp, "src/main/java").apply { mkdirs() }),
         kotlinSourceDirs = listOf(File(tmp, "src/main/kotlin").apply { mkdirs() }),
-        resourceDir = File(tmp, "src/main/res").apply { mkdirs() },
+        resourceDir = null,
         assetDir = null,
         manifestFile = File(tmp, "src/main/AndroidManifest.xml").apply { writeText("<manifest/>") },
         packageName = "com.test.app",
