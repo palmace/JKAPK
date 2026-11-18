@@ -15,5 +15,5 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "JKAPK"
-include(":app")
+// include(":app")  // se activa cuando app/ tenga build.gradle.kts
 include(":engine")
