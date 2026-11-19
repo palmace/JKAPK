@@ -13,3 +13,5 @@ build/
 local.properties
 *.log
 .DS_Store
+*.apk
+*.bak

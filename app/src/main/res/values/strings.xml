@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">JKAPK</string>
+    <string name="build_notification_channel_name">Compilación JKAPK</string>
+    <string name="build_notification_title">Compilando proyecto Android</string>
+</resources>
