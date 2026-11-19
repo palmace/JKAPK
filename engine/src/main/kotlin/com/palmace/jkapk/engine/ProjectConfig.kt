@@ -11,6 +11,14 @@ enum class JavaVersion(val major: Int) {
     val flag: String get() = "--release=$major"
 }
 
+// Configuracion de firma. Si es null, se usa el debug keystore empaquetado.
+data class SigningConfig(
+    val keystoreFile: File,
+    val keystorePassword: String,
+    val keyAlias: String,
+    val keyPassword: String
+)
+
 data class ProjectConfig(
     val projectName: String,
     val projectRoot: File,
@@ -30,5 +38,6 @@ data class ProjectConfig(
     val incremental: Boolean = true,
     val buildOutputDir: File,
     val androidJar: File = File(""),
-    val aapt2Binary: File? = null
+    val aapt2Binary: File? = null,
+    val signingConfig: SigningConfig? = null
 )
