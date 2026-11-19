@@ -2,22 +2,11 @@ package com.palmace.jkapk.engine
 
 import java.io.File
 
-enum class JavaVersion(val major: Int) {
-    VERSION_8(8),
-    VERSION_11(11),
-    VERSION_17(17),
-    VERSION_21(21);
-
-    val flag: String get() = "--release=$major"
+enum class JavaVersion(val release: String) {
+    JAVA_11("11"),
+    JAVA_17("17"),
+    JAVA_21("21")
 }
-
-// Configuracion de firma. Si es null, se usa el debug keystore empaquetado.
-data class SigningConfig(
-    val keystoreFile: File,
-    val keystorePassword: String,
-    val keyAlias: String,
-    val keyPassword: String
-)
 
 data class ProjectConfig(
     val projectName: String,
@@ -26,17 +15,13 @@ data class ProjectConfig(
     val kotlinSourceDirs: List<File>,
     val resourceDir: File?,
     val assetDir: File?,
-    val manifestFile: File,
     val libsDirs: List<File> = emptyList(),
-    val dependencies: List<Dependency> = emptyList(),
+    val manifestFile: File,
     val packageName: String,
     val compileSdk: Int,
     val minSdk: Int,
-    val targetSdk: Int = compileSdk,
-    val javaVersion: JavaVersion = JavaVersion.VERSION_17,
-    val multidex: Boolean = true,
-    val incremental: Boolean = true,
     val buildOutputDir: File,
+    val javaVersion: JavaVersion = JavaVersion.JAVA_17,
     val androidJar: File = File(""),
     val aapt2Binary: File? = null,
     val signingConfig: SigningConfig? = null
