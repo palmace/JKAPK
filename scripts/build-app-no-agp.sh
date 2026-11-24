@@ -54,11 +54,40 @@ CACHE_JARS_FILE="$OUT_DIR/classpath.txt"
 printf "%s\n" "$ENGINE_JAR" >> "$CACHE_JARS_FILE"
 printf "%s\n" "$ANDROID_JAR" >> "$CACHE_JARS_FILE"
 
+for stdlib_cand in \
+  "/data/data/com.termux/files/usr/opt/gradle/lib/kotlin-stdlib-2.4.21.jar" \
+  "/data/data/com.termux/files/usr/opt/kotlin/lib/kotlin-stdlib.jar"
+do
+  if [[ -f "$stdlib_cand" ]]; then
+    printf "%s\n" "$stdlib_cand" >> "$CACHE_JARS_FILE"
+    break
+  fi
+done
+
 find "$HOME/.gradle/caches/modules-2/files-2.1" -name "*.jar" 2>/dev/null \
   | grep -vE "sources\.jar$|javadoc\.jar$|pom\.jar$" \
-  | grep -E "kotlin-stdlib|kotlinx-coroutines|appcompat|material|core-ktx|core-|lifecycle|fragment|activity|annotation|collection|drawerlayout|viewpager|coordinatorlayout|r8|apksig|bcprov" \
+  | grep -vE '/kotlin-stdlib(-[0-9].*)?\.jar$' \
+  | grep -E "kotlinx-coroutines|appcompat|material|core-ktx|core-|lifecycle|fragment|activity|annotation|collection|drawerlayout|viewpager|coordinatorlayout|r8|apksig|bcprov" \
   | grep -vE 'kotlinx-coroutines-core-jvm-1\.5\.0\.jar|kotlinx-coroutines-test-jvm-.*\.jar|/annotations-13\.0\.jar$' \
   | awk -F/ '{ if (!seen[$NF]++) print $0 }' >> "$CACHE_JARS_FILE"
+
+# Buscar kotlin-compiler-embeddable en la cache de Gradle primero
+KC_GRADLE="$PROJECT_ROOT/app/src/main/assets/kotlin-compiler-embeddable.jar"
+if [[ -n "$KC_GRADLE" && -f "$KC_GRADLE" ]]; then
+  printf "%s\n" "$KC_GRADLE" >> "$CACHE_JARS_FILE"
+else
+  # Fallback a rutas locales
+  for kc_cand in \
+    "$OUT_DIR/kotlin-compiler-android-no-jmx.jar" \
+    "/data/data/com.termux/files/usr/opt/gradle/lib/kotlin-compiler-embeddable-2.4.21-min.jar" \
+    "/data/data/com.termux/files/usr/opt/kotlin/lib/kotlin-compiler.jar"
+  do
+    if [[ -f "$kc_cand" ]]; then
+      printf "%s\n" "$kc_cand" >> "$CACHE_JARS_FILE"
+      break
+    fi
+  done
+fi
 
 CLASSPATH="$(paste -sd: "$CACHE_JARS_FILE")"
 
@@ -77,6 +106,10 @@ rm -f "$LINKED_APK"
 "$AAPT2_BIN" link \
   -I "$ANDROID_JAR" \
   --manifest "$PROJECT_ROOT/app/src/main/AndroidManifest.xml" \
+  --version-code 1 \
+  --version-name "1.0" \
+  --min-sdk-version 24 \
+  --target-sdk-version 35 \
   --java "$GEN_SRC" \
   --auto-add-overlay \
   --custom-package "com.palmace.jkapk.app" \
@@ -134,9 +167,9 @@ while IFS= read -r jar_line; do
 done < "$CACHE_JARS_FILE"
 
 if [[ -n "$D8_BIN" ]]; then
-  "$D8_BIN" --min-api 24 --lib "$ANDROID_JAR" --output "$DEX_DIR" "${DEX_INPUTS[@]}"
+  "$D8_BIN" --min-api 26 --lib "$ANDROID_JAR" --output "$DEX_DIR" "${DEX_INPUTS[@]}"
 elif [[ -n "$R8_JAR" ]]; then
-  java -cp "$R8_JAR" com.android.tools.r8.D8 --min-api 24 --lib "$ANDROID_JAR" --output "$DEX_DIR" "${DEX_INPUTS[@]}"
+  java -cp "$R8_JAR" com.android.tools.r8.D8 --min-api 26 --lib "$ANDROID_JAR" --output "$DEX_DIR" "${DEX_INPUTS[@]}"
 else
   echo "ERROR: No se encontro ni d8 ni r8.jar para generar classes.dex." >&2
   exit 1
@@ -146,11 +179,15 @@ echo "[5/6] Empaquetando APK..."
 cp "$LINKED_APK" "$UNSIGNED_APK"
 
 if [[ -d "$PROJECT_ROOT/app/src/main/jniLibs" ]] && find "$PROJECT_ROOT/app/src/main/jniLibs" -type f | grep -q .; then
-  (cd "$PROJECT_ROOT/app/src/main" && zip -qr "$UNSIGNED_APK" lib)
+  JNI_STAGE="$OUT_DIR/jni-stage/lib"
+  rm -rf "$OUT_DIR/jni-stage"
+  mkdir -p "$JNI_STAGE"
+  cp -r "$PROJECT_ROOT/app/src/main/jniLibs/." "$JNI_STAGE/"
+  (cd "$OUT_DIR/jni-stage" && zip -qr0 "$UNSIGNED_APK" lib)
 fi
 
 if [[ -d "$PROJECT_ROOT/app/src/main/assets" && -n "$(ls -A "$PROJECT_ROOT/app/src/main/assets" 2>/dev/null || true)" ]]; then
-  (cd "$PROJECT_ROOT/app/src/main" && zip -qr "$UNSIGNED_APK" assets)
+  (cd "$PROJECT_ROOT/app/src/main" && zip -qr0 "$UNSIGNED_APK" assets)
 fi
 
 (cd "$DEX_DIR" && zip -qj "$UNSIGNED_APK" classes*.dex)
@@ -158,7 +195,7 @@ fi
 ZIPALIGN_BIN="${ZIPALIGN_BIN:-$(command -v zipalign || true)}"
 APK_TO_SIGN="$UNSIGNED_APK"
 if [[ -n "$ZIPALIGN_BIN" ]]; then
-  "$ZIPALIGN_BIN" -f 4 "$UNSIGNED_APK" "$ALIGNED_APK"
+  "$ZIPALIGN_BIN" -f -p 4 "$UNSIGNED_APK" "$ALIGNED_APK"
   APK_TO_SIGN="$ALIGNED_APK"
 fi
 
@@ -194,4 +231,12 @@ else
   exit 1
 fi
 
+for dest_dir in "/sdcard/download/jkapk-APK" "/sdcard/Download/jkapk-APK"; do
+  mkdir -p "$dest_dir"
+  cp -f "$SIGNED_APK" "$dest_dir/jkapk-app-debug.apk"
+  echo "APK copiado a: $dest_dir/jkapk-app-debug.apk"
+done
 echo "APK listo en: $SIGNED_APK"
+
+cp -f "$SIGNED_APK" "/sdcard/Download/jkapk-app-debug.apk" 2>/dev/null || true
+mkdir -p "$HOME/storage/downloads" && cp -f "$SIGNED_APK" "$HOME/storage/downloads/jkapk-app-debug.apk" 2>/dev/null || true

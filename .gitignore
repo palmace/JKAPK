@@ -15,3 +15,10 @@ local.properties
 .DS_Store
 *.apk
 *.bak
+
+# Artefactos locales, binarios estáticos y scripts temporales
+_patch_jnilib_zip.py
+android-sdk-tools-static-aarch64.zip
+build-tools/
+platform-tools/
+others/

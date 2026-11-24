@@ -2,12 +2,17 @@ package com.palmace.jkapk.app
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.Build
+import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import android.os.IBinder
 import android.widget.Button
 import android.widget.EditText
@@ -27,6 +32,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 class MainActivity : Activity() {
 
@@ -41,6 +48,8 @@ class MainActivity : Activity() {
     private var activeWorkspace: ProjectWorkspace? = null
     private var boundService: BuildService? = null
     private var isBound: Boolean = false
+    private var awaitingStoragePermission: Boolean = false
+
 
     private lateinit var tvProjectsRoot: TextView
     private lateinit var etProjectName: EditText
@@ -48,8 +57,10 @@ class MainActivity : Activity() {
     private lateinit var btnCreateKotlin: Button
     private lateinit var btnCreateJava: Button
     private lateinit var tvActiveProject: TextView
+    private lateinit var btnPickProject: Button
     private lateinit var btnPickFile: Button
     private lateinit var btnSaveFile: Button
+    private lateinit var btnImportAndroidJar: Button
     private lateinit var tvActiveFile: TextView
     private lateinit var etCodeEditor: EditText
     private lateinit var btnBuild: Button
@@ -58,6 +69,7 @@ class MainActivity : Activity() {
     private lateinit var tvBuildStatus: TextView
     private lateinit var progressBuild: ProgressBar
     private lateinit var containerDiagnostics: LinearLayout
+    private lateinit var btnCopyLogs: Button
     private lateinit var tvLogs: TextView
 
     private val serviceConnection = object : ServiceConnection {
@@ -81,16 +93,60 @@ class MainActivity : Activity() {
         observeBuildState()
 
         tvProjectsRoot.text = "Directorio: ${app.projectsDirectory.absolutePath}"
-        val existing = app.projectScanner.discoverProjects(app.projectsDirectory).firstOrNull()
-        if (existing != null) {
-            selectProject(existing)
-        }
+        ensureStorageAccessAndLoadProjects()
     }
 
     override fun onStart() {
         super.onStart()
         Intent(this, BuildService::class.java).also { intent ->
             bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (awaitingStoragePermission) {
+            awaitingStoragePermission = false
+            ensureStorageAccessAndLoadProjects()
+        }
+    }
+
+    private fun hasAllFilesAccess(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            true
+        }
+    }
+
+    private fun ensureStorageAccessAndLoadProjects() {
+        if (!hasAllFilesAccess() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            awaitingStoragePermission = true
+            tvBuildStatus.text = "Estado: Concede permiso 'Acceso a todos los archivos' en Ajustes"
+            Toast.makeText(
+                this,
+                "Activa 'Permitir acceso a todos los archivos' para leer Jkapkprojects",
+                Toast.LENGTH_LONG
+            ).show()
+            val intent = Intent(
+                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                Uri.parse("package:$packageName")
+            )
+            runCatching {
+                startActivity(intent)
+            }.onFailure {
+                startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+            }
+            return
+        }
+
+        runCatching {
+            val existing = app.projectScanner.discoverProjects(app.projectsDirectory).firstOrNull()
+            if (existing != null) {
+                selectProject(existing)
+            }
+        }.onFailure { err ->
+            tvBuildStatus.text = "Estado: Error de acceso a proyectos (${err.message})"
         }
     }
 
@@ -116,6 +172,7 @@ class MainActivity : Activity() {
         btnCreateKotlin = findViewById(R.id.btnCreateKotlin)
         btnCreateJava = findViewById(R.id.btnCreateJava)
         tvActiveProject = findViewById(R.id.tvActiveProject)
+        btnPickProject = findViewById(R.id.btnPickProject)
         btnPickFile = findViewById(R.id.btnPickFile)
         btnSaveFile = findViewById(R.id.btnSaveFile)
         tvActiveFile = findViewById(R.id.tvActiveFile)
@@ -126,12 +183,23 @@ class MainActivity : Activity() {
         tvBuildStatus = findViewById(R.id.tvBuildStatus)
         progressBuild = findViewById(R.id.progressBuild)
         containerDiagnostics = findViewById(R.id.containerDiagnostics)
+        btnCopyLogs = findViewById(R.id.btnCopyLogs)
         tvLogs = findViewById(R.id.tvLogs)
     }
 
     private fun setupListeners() {
         btnCreateKotlin.setOnClickListener { createNewProject(ProjectLanguage.KOTLIN) }
         btnCreateJava.setOnClickListener { createNewProject(ProjectLanguage.JAVA) }
+        btnCopyLogs.setOnClickListener { copyBuildLogsToClipboard() }
+
+        btnPickProject.setOnClickListener {
+            showProjectsDialog()
+        }
+        btnImportAndroidJar = findViewById(R.id.btnImportAndroidJar)
+        btnImportAndroidJar.setOnClickListener {
+            importAndroidJar()
+        }
+
 
         btnPickFile.setOnClickListener {
             val ws = activeWorkspace
@@ -196,6 +264,62 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun animateCopyButtonFeedback(copiedOk: Boolean) {
+        val originalTint = btnCopyLogs.backgroundTintList
+        val feedbackColor = if (copiedOk) 0xFF2E7D32.toInt() else 0xFFC62828.toInt()
+        val originalText = btnCopyLogs.text
+
+        btnCopyLogs.animate().cancel()
+        btnCopyLogs.scaleX = 0.95f
+        btnCopyLogs.scaleY = 0.95f
+        btnCopyLogs.backgroundTintList = android.content.res.ColorStateList.valueOf(feedbackColor)
+        btnCopyLogs.text = if (copiedOk) "Copiado" else "Sin log"
+
+        btnCopyLogs.animate()
+            .scaleX(1.0f)
+            .scaleY(1.0f)
+            .setDuration(180L)
+            .start()
+
+        btnCopyLogs.postDelayed({
+            btnCopyLogs.backgroundTintList = originalTint
+            btnCopyLogs.text = originalText
+        }, 800L)
+    }
+
+    private fun copyBuildLogsToClipboard() {
+        val logText = tvLogs.text?.toString().orEmpty()
+        if (logText.isBlank()) {
+            animateCopyButtonFeedback(copiedOk = false)
+            Toast.makeText(this, "No hay logs para copiar", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("JKAPK Build Log", logText))
+        animateCopyButtonFeedback(copiedOk = true)
+        Toast.makeText(this, "Log copiado al portapapeles", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showProjectsDialog() {
+        val projects = app.projectScanner.discoverProjects(app.projectsDirectory)
+        if (projects.isEmpty()) {
+            Toast.makeText(
+                this,
+                "No se encontraron proyectos en ${app.projectsDirectory.name}",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+        val labels = projects.map { "${it.name} (${it.packageName})" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Seleccionar proyecto")
+            .setItems(labels) { _, which ->
+                val chosen = projects.getOrNull(which) ?: return@setItems
+                selectProject(chosen)
+            }
+            .show()
+    }
+
     private fun createNewProject(language: ProjectLanguage) {
         val rawName = etProjectName.text?.toString()?.trim().orEmpty().ifEmpty { "DemoApp" }
         val rawPkg = etPackageName.text?.toString()?.trim().orEmpty().ifEmpty { "com.palmace.demo" }
@@ -249,6 +373,7 @@ class MainActivity : Activity() {
             }
             .show()
     }
+
 
     private fun observeEditorState() {
         editorJob?.cancel()
@@ -348,4 +473,44 @@ class MainActivity : Activity() {
             containerDiagnostics.addView(itemView)
         }
     }
+
+
+
+    companion object {
+        private const val REQUEST_IMPORT_ANDROID_JAR = 1001
+    }
+
+    private fun importAndroidJar() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+        startActivityForResult(intent, REQUEST_IMPORT_ANDROID_JAR)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_IMPORT_ANDROID_JAR && resultCode == RESULT_OK) {
+            data?.data?.let { uri ->
+                uiScope.launch(Dispatchers.IO) {
+                    try {
+                        val targetDir = File(filesDir, "android-sdk/platforms/android-34")
+                        targetDir.mkdirs()
+                        val targetFile = File(targetDir, "android.jar")
+                        contentResolver.openInputStream(uri)?.use { input ->
+                            targetFile.outputStream().use { output -> input.copyTo(output) }
+                        }
+                        runOnUiThread {
+                            Toast.makeText(this@MainActivity, "android.jar importado correctamente", Toast.LENGTH_LONG).show()
+                        }
+                    } catch (e: Exception) {
+                        runOnUiThread {
+                            Toast.makeText(this@MainActivity, "Error importando android.jar: ${e.message}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
 }

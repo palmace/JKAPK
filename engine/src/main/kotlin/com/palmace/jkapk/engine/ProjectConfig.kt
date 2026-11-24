@@ -21,8 +21,10 @@ data class ProjectConfig(
     val compileSdk: Int,
     val minSdk: Int,
     val buildOutputDir: File,
+    val appCacheDir: File = File(""),
     val javaVersion: JavaVersion = JavaVersion.JAVA_17,
     val androidJar: File = File(""),
     val aapt2Binary: File? = null,
-    val signingConfig: SigningConfig? = null
+    val signingConfig: SigningConfig? = null,
+    val internalBinDirs: List<File> = emptyList()
 )

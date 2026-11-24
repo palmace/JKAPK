@@ -37,6 +37,63 @@ class JkapkApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        android.widget.Toast.makeText(this, "JkapkApplication.onCreate ejecutado", android.widget.Toast.LENGTH_SHORT).show()
+        // Copiar kotlin-stdlib.jar desde assets a cacheDir
+        val stdlibAsset = "kotlin-stdlib.jar"
+        val stdlibTarget = File(cacheDir, stdlibAsset)
+        try {
+            if (!stdlibTarget.exists()) {
+                assets.open(stdlibAsset).use { input ->
+                    stdlibTarget.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("JkapkApplication", "Error copiando kotlin-stdlib.jar: ${e.message}", e)
+        }
+
+        // Copiar kotlin-compiler-embeddable.jar desde assets a cacheDir (validando tamano y copia atomica)
+        val compilerAsset = "kotlin-compiler-embeddable.jar"
+        val compilerTarget = File(cacheDir, compilerAsset)
+        val compilerTmp = File(cacheDir, "$compilerAsset.tmp")
+        try {
+            val expectedSize = try {
+                assets.openFd(compilerAsset).use { it.length }
+            } catch (_: Exception) {
+                -1L
+            }
+            val needsCopy = !compilerTarget.exists() ||
+                compilerTarget.length() <= 0L ||
+                (expectedSize > 0L && compilerTarget.length() != expectedSize)
+            if (needsCopy) {
+                if (compilerTmp.exists()) compilerTmp.delete()
+                assets.open(compilerAsset).use { input ->
+                    compilerTmp.outputStream().buffered(65536).use { output ->
+                        input.copyTo(output, bufferSize = 65536)
+                        output.flush()
+                    }
+                }
+                if (compilerTmp.length() <= 0L) {
+                    throw IllegalStateException("Archivo copiado vacio para $compilerAsset")
+                }
+                if (compilerTarget.exists() && !compilerTarget.delete()) {
+                    throw IllegalStateException("No se pudo reemplazar ${compilerTarget.absolutePath}")
+                }
+                if (!compilerTmp.renameTo(compilerTarget)) {
+                    compilerTmp.copyTo(compilerTarget, overwrite = true)
+                    compilerTmp.delete()
+                }
+            }
+        } catch (e: Exception) {
+            if (compilerTmp.exists()) compilerTmp.delete()
+            android.util.Log.e("JkapkApplication", "Error copiando kotlin-compiler-embeddable.jar: ${e.message}", e)
+            android.widget.Toast.makeText(this, "Error copiando compilador: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+        }
+        if (compilerTarget.exists()) {
+            android.util.Log.i("JkapkApplication", "Compilador copiado OK: ${compilerTarget.absolutePath} (${compilerTarget.length()} bytes)")
+        }
+
         instance = this
 
         toolchainPaths = ToolchainPaths.fromContext(this)

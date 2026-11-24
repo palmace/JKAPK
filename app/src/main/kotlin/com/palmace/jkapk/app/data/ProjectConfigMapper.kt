@@ -11,8 +11,10 @@ class ProjectConfigMapper(
     private val toolchainPaths: ToolchainPaths
 ) {
     fun toEngineConfig(
+        appCacheDir: File,
         workspace: ProjectWorkspace,
-        signingConfig: SigningConfig? = null
+        signingConfig: SigningConfig? = null,
+        androidJarOverride: File? = null
     ): ProjectConfig {
         val javaDirs = listOfNotNull(workspace.javaDir.takeIf { it.isDirectory })
         val kotlinDirs = listOfNotNull(workspace.kotlinDir.takeIf { it.isDirectory })
@@ -27,6 +29,10 @@ class ProjectConfigMapper(
             else -> JavaVersion.JAVA_17
         }
 
+        // Usar el androidJar inyectado, o resolverlo por defecto
+        val resolvedAndroidJar = androidJarOverride 
+            ?: toolchainPaths.defaultAndroidJar
+
         return ProjectConfig(
             projectName = workspace.name,
             projectRoot = workspace.rootDir,
@@ -40,10 +46,15 @@ class ProjectConfigMapper(
             compileSdk = workspace.compileSdk,
             minSdk = workspace.minSdk,
             buildOutputDir = outputDir,
+            appCacheDir = appCacheDir,
             javaVersion = mappedJavaVersion,
-            androidJar = toolchainPaths.resolveAndroidJar(workspace.compileSdk),
+            androidJar = resolvedAndroidJar,
             aapt2Binary = toolchainPaths.resolveAapt2Binary(),
-            signingConfig = signingConfig
+            signingConfig = signingConfig,
+            internalBinDirs = listOf(
+                File(toolchainPaths.appFilesDir, "jkapk-bin"),
+                File(toolchainPaths.appCodeCacheDir, "jkapk-bin")
+            )
         )
     }
 }

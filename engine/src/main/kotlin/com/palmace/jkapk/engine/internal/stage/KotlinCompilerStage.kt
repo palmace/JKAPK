@@ -35,14 +35,92 @@ internal class KotlinCompilerStage : BuildStageExecutor<ResolvedClasspath, Resol
 
         val outputDir = File(ctx.workDir, "classes/kotlin").apply { mkdirs() }
 
-        val classpath = input.jars.joinToString(File.pathSeparator) { it.absolutePath }
+        // Buscar kotlin-stdlib en la cache de Gradle (necesario para compilar)
+fun resolveValidJar(f: File?): File? = f?.takeIf { it.exists() && it.length() > 10_000L }
+
+val gradleStdlib = File(System.getProperty("user.home") ?: "", ".gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib")
+    .takeIf { it.exists() }
+    ?.walkTopDown()
+    ?.firstOrNull { it.name.startsWith("kotlin-stdlib-") && it.name.endsWith(".jar") && it.length() > 10_000L }
+
+val candidateStdlibFiles = listOfNotNull(
+    gradleStdlib,
+    resolveValidJar(File(ctx.cacheDir, "kotlin-stdlib.jar")),
+    resolveValidJar(File(ctx.config.appCacheDir, "kotlin-stdlib.jar")),
+    resolveValidJar(File(ctx.config.appCacheDir, "kotlin-stdlib-1.9.24.jar")),
+    resolveValidJar(File(ctx.config.appCacheDir.parentFile ?: ctx.config.appCacheDir, "cache/kotlin-stdlib.jar"))
+)
+
+var stdlibJar = candidateStdlibFiles.firstOrNull()
+if (stdlibJar == null) {
+    try {
+        val appCls = Class.forName("com.palmace.jkapk.app.JkapkApplication")
+        val appInst = appCls.getMethod("getInstance").invoke(null)
+        val assetsObj = appCls.getMethod("getAssets").invoke(appInst)
+        val openMethod = assetsObj.javaClass.getMethod("open", String::class.java)
+        val assetNames = listOf("kotlin-stdlib.jar", "kotlin-stdlib-1.9.24.jar", "kotlin-stdlib-2.4.21.jar")
+        for (assetName in assetNames) {
+            try {
+                val dst = File(ctx.cacheDir, "kotlin-stdlib.jar")
+                (openMethod.invoke(assetsObj, assetName) as? java.io.InputStream)?.use { inp ->
+                    dst.outputStream().buffered(65536).use { out -> inp.copyTo(out, bufferSize = 65536) }
+                }
+                if (resolveValidJar(dst) != null) {
+                    stdlibJar = dst
+                    ctx.log(LogLevel.INFO, "KotlinCompiler", "Extraido $assetName desde assets (${dst.length()} B)")
+                    break
+                }
+            } catch (_: Throwable) {
+            }
+        }
+    } catch (_: Throwable) {
+    }
+}
+ctx.log(
+    LogLevel.INFO,
+    "KotlinCompiler",
+    "stdlibJar=${stdlibJar?.absolutePath ?: "NONE"} (${stdlibJar?.length() ?: 0L}B), androidJar=${ctx.config.androidJar.absolutePath} (${ctx.config.androidJar.length()}B)"
+)
+
+val baseJars = if (stdlibJar != null && stdlibJar !in input.jars) {
+    input.jars + stdlibJar
+} else {
+    input.jars
+}
+val androidJarFile = ctx.config.androidJar
+val allJars = if (androidJarFile.exists() && androidJarFile.length() > 0L && androidJarFile !in baseJars) {
+    baseJars + androidJarFile
+} else {
+    baseJars
+}
+
+val classpath = allJars.joinToString(File.pathSeparator) { it.absolutePath }
         val allSources = kotlinFiles + javaFilesForSymbols
 
+        val kotlinHomeDir = File(ctx.workDir, "kotlin-home").apply {
+            File(this, "lib").mkdirs()
+        }
+        val homeLibDir = File(kotlinHomeDir, "lib")
+        val candidateStdlibs = listOfNotNull(
+            stdlibJar,
+            File(ctx.config.appCacheDir, "kotlin-stdlib.jar").takeIf { it.exists() },
+            File(ctx.config.appCacheDir, "kotlin-stdlib-1.9.24.jar").takeIf { it.exists() }
+        )
+        candidateStdlibs.firstOrNull()?.let { srcLib ->
+            val dstLib = File(homeLibDir, "kotlin-stdlib.jar")
+            if (!dstLib.exists() || dstLib.length() != srcLib.length()) {
+                srcLib.copyTo(dstLib, overwrite = true)
+            }
+        }
+        System.setProperty("kotlin.home", kotlinHomeDir.absolutePath)
+
         val args = arrayOf(
+            "-kotlin-home", kotlinHomeDir.absolutePath,
             "-d", outputDir.absolutePath,
             "-classpath", classpath,
             "-no-stdlib",
             "-no-reflect",
+            "-no-jdk",
             "-jvm-target", "17",
             *allSources.map { it.absolutePath }.toTypedArray()
         )
@@ -56,8 +134,91 @@ internal class KotlinCompilerStage : BuildStageExecutor<ResolvedClasspath, Resol
         val buffer = ByteArrayOutputStream()
         val errStream = PrintStream(buffer, true, "UTF-8")
 
+        // Cargar el compilador desde el JAR extraido en appCacheDir (con diagnostico y respaldo)
+        val compilerJar = File(ctx.config.appCacheDir, "kotlin-compiler-embeddable.jar")
+        if (!compilerJar.exists() || compilerJar.length() <= 0L) {
+            val cacheListing = ctx.config.appCacheDir.listFiles()
+                ?.joinToString(", ") { "${it.name}(${it.length()}B)" }
+                ?: "<dir no existe o no legible>"
+            ctx.log(
+                LogLevel.entries.firstOrNull { it.name.contains("WARN", ignoreCase = true) } ?: LogLevel.entries.first(),
+                "KotlinCompiler",
+                "Falta ${compilerJar.absolutePath} (exists=${compilerJar.exists()}, size=${compilerJar.length()}). En appCacheDir: $cacheListing"
+            )
+            val fallbackCandidates = listOfNotNull(
+                File(ctx.config.appCacheDir.parentFile ?: ctx.config.appCacheDir, "cache/kotlin-compiler-embeddable.jar"),
+                File(System.getProperty("user.home") ?: "", ".gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compiler-embeddable/1.9.24")
+                    .takeIf { it.exists() }
+                    ?.walkTopDown()
+                    ?.firstOrNull { it.name.endsWith(".jar") && it.length() > 10_000_000L }
+            )
+            val foundFallback = fallbackCandidates.firstOrNull { it.exists() && it.length() > 0L }
+            if (foundFallback != null && foundFallback.absolutePath != compilerJar.absolutePath) {
+                compilerJar.parentFile?.mkdirs()
+                foundFallback.copyTo(compilerJar, overwrite = true)
+                ctx.log(LogLevel.INFO, "KotlinCompiler", "Copiado JAR desde respaldo: ${foundFallback.absolutePath}")
+            }
+        }
+        if (!compilerJar.exists() || compilerJar.length() <= 0L) {
+            try {
+                if (compilerJar.exists() && compilerJar.length() == 0L) compilerJar.delete()
+                val appCls = Class.forName("com.palmace.jkapk.app.JkapkApplication")
+                val appInst = try {
+                    appCls.getMethod("getInstance").invoke(null)
+                } catch (_: Throwable) {
+                    val compField = appCls.getDeclaredField("Companion").apply { isAccessible = true }
+                    val compObj = compField.get(null)
+                    compObj.javaClass.getMethod("getInstance").invoke(compObj)
+                }
+                val assetsObj = appCls.getMethod("getAssets").invoke(appInst)
+                val openMethod = assetsObj.javaClass.getMethod("open", String::class.java)
+                val tmpFile = File(compilerJar.parentFile, "kotlin-compiler-embeddable.jar.tmp")
+                if (tmpFile.exists()) tmpFile.delete()
+                (openMethod.invoke(assetsObj, "kotlin-compiler-embeddable.jar") as java.io.InputStream).use { assetStream ->
+                    tmpFile.outputStream().buffered(65536).use { output ->
+                        assetStream.copyTo(output, bufferSize = 65536)
+                        output.flush()
+                    }
+                }
+                if (tmpFile.length() > 10_000_000L) {
+                    if (compilerJar.exists()) compilerJar.delete()
+                    if (!tmpFile.renameTo(compilerJar)) {
+                        tmpFile.copyTo(compilerJar, overwrite = true)
+                        tmpFile.delete()
+                    }
+                    ctx.log(LogLevel.INFO, "KotlinCompiler", "Extraido desde assets: ${compilerJar.length()} bytes")
+                } else {
+                    if (tmpFile.exists()) tmpFile.delete()
+                }
+            } catch (ex: Throwable) {
+                ctx.log(
+                    LogLevel.entries.firstOrNull { it.name.contains("WARN", ignoreCase = true) } ?: LogLevel.entries.first(),
+                    "KotlinCompiler",
+                    "Fallo respaldo desde assets: ${ex.message}"
+                )
+            }
+        }
+        if (!compilerJar.exists() || compilerJar.length() <= 0L) {
+            throw KotlinCompilationException(
+                "No se encontro kotlin-compiler-embeddable.jar en ${compilerJar.absolutePath} (size=${compilerJar.length()})",
+                emptyList()
+            )
+        }
+
+        System.setProperty("jkapk.compiler.jar", compilerJar.absolutePath)
         val exitCode = try {
-            K2JVMCompiler().exec(errStream, *args)
+            val classLoader = java.net.URLClassLoader(
+                arrayOf(compilerJar.toURI().toURL()),
+                this::class.java.classLoader
+            )
+            val compilerClass = classLoader.loadClass("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler")
+            val compiler = compilerClass.getDeclaredConstructor().newInstance()
+            val execMethod = compilerClass.getMethod(
+                "exec",
+                java.io.PrintStream::class.java,
+                Array<String>::class.java
+            )
+            execMethod.invoke(compiler, errStream, args) as org.jetbrains.kotlin.cli.common.ExitCode
         } catch (t: Throwable) {
             errStream.flush()
             val raw = buffer.toString("UTF-8")
@@ -81,7 +242,7 @@ internal class KotlinCompilerStage : BuildStageExecutor<ResolvedClasspath, Resol
 
         if (exitCode.code != 0 || errorCount > 0) {
             throw KotlinCompilationException(
-                "Kotlin fallo con $errorCount error(es)",
+                "Kotlin fallo con $errorCount error(es). Salida: $rawOutput",
                 diagnostics
             )
         }

@@ -22,7 +22,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 import java.security.MessageDigest
 
-internal class DefaultBuildEngine : BuildEngine {
+internal class DefaultBuildEngine(
+    private val logSink: ((level: String, tag: String, message: String) -> Unit)? = null
+) : BuildEngine {
+    constructor() : this(null)
 
     private val _state = MutableStateFlow<BuildState>(BuildState.Idle)
     override val state: StateFlow<BuildState> = _state.asStateFlow()
@@ -36,7 +39,10 @@ internal class DefaultBuildEngine : BuildEngine {
         val projectHash = hashOf(config.projectRoot.absolutePath)
         val workDir = File(config.buildOutputDir, "work-$projectHash-${System.currentTimeMillis()}")
         val cacheDir = File(config.buildOutputDir, "cache-$projectHash")
-        val nativeLibDir = File(config.projectRoot, "engine-native")
+        val nativeLibDir = config.aapt2Binary?.parentFile?.takeIf { it.isDirectory }
+            ?: config.internalBinDirs.firstOrNull { it.isDirectory }
+            ?: config.internalBinDirs.firstOrNull()
+            ?: File(config.buildOutputDir, "native-bin")
 
         workDir.mkdirs()
         cacheDir.mkdirs()
@@ -47,7 +53,7 @@ internal class DefaultBuildEngine : BuildEngine {
             cacheDir = cacheDir,
             nativeLibDir = nativeLibDir,
             stateFlow = _state,
-            logger = { _, _, _ -> },
+            logger = { level, tag, msg -> logSink?.invoke(level.name, tag, msg) },
             diagnosticSink = { diagnostics.add(it) }
         )
         activeContext = ctx
@@ -85,14 +91,19 @@ internal class DefaultBuildEngine : BuildEngine {
                 durationMs = System.currentTimeMillis() - start
             )
         } catch (t: Throwable) {
+            val failedStage = when (t) {
+                is com.palmace.jkapk.engine.internal.stage.Aapt2UnavailableException -> BuildStage.RESOURCES
+                is com.palmace.jkapk.engine.internal.stage.Aapt2ExecutionException -> BuildStage.RESOURCES
+                else -> BuildStage.RESOLVE
+            }
             val failureDiag = BuildDiagnostic(
                 severity = Severity.ERROR,
-                message = "Fallo inesperado: ${t.message}",
-                stage = BuildStage.RESOLVE,
+                message = "Fallo en ${failedStage.name}: ${t.message}",
+                stage = failedStage,
                 rawOutput = t.stackTraceToString()
             )
             diagnostics.add(failureDiag)
-            _state.value = BuildState.Failed(BuildStage.RESOLVE, diagnostics.toList(), t)
+            _state.value = BuildState.Failed(failedStage, diagnostics.toList(), t)
             BuildResult(
                 success = false,
                 apk = null,
