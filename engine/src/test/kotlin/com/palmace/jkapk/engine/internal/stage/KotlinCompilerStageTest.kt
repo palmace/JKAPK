@@ -8,6 +8,7 @@ import com.palmace.jkapk.engine.ProjectConfig
 import com.palmace.jkapk.engine.internal.resolve.ResolvedClasspath
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
@@ -50,7 +51,7 @@ class KotlinCompilerStageTest {
     fun `sin kotlin no compila`() = runTest {
         val config = fakeConfig()
         val stage = KotlinCompilerStage()
-        val result = stage.execute(ResolvedClasspath(emptyList()), fakeCtx(config))
+        val result = stage.execute(ResolvedClasspath(emptyList()), ctx)
         assertTrue(result.jars.isEmpty())
     }
 

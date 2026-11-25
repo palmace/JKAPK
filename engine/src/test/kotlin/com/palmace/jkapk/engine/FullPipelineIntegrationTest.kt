@@ -129,6 +129,7 @@ class FullPipelineIntegrationTest {
             compileSdk = 34,
             minSdk = 24,
             buildOutputDir = File(tmp, "build-out").apply { mkdirs() },
+              appCacheDir = File(tmp, "cache").apply { mkdirs() },
             androidJar = androidJar!!,
             aapt2Binary = aapt2
         )
