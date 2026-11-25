@@ -16,6 +16,7 @@ import com.palmace.jkapk.engine.LogLevel
 import com.palmace.jkapk.engine.Severity
 import com.palmace.jkapk.engine.internal.resolve.ResolvedClasspath
 import java.io.File
+import java.util.zip.ZipInputStream
 
 // Etapa D8: convierte los .class compilados (Kotlin + Java) a .dex.
 // Usa la API programatica de D8 (com.android.tools.r8) sin proceso externo.
@@ -97,12 +98,42 @@ internal class DexStage : BuildStageExecutor<ResolvedClasspath, ResolvedClasspat
                 builder.addClassProgramData(classFile.readBytes(), Origin.root())
             }
 
-            // Classpath: jars de dependencias (resolucion, no dexificacion)
-            if (classpathJars.isNotEmpty()) {
-                builder.addClasspathFiles(classpathJars.map { it.toPath() })
-            }
+            // Classpath: jars de dependencias (resolucion) + dexificacion de kotlin-stdlib para runtime
+              if (classpathJars.isNotEmpty()) {
+                  builder.addClasspathFiles(classpathJars.map { it.toPath() })
+              }
 
-            // Library files: android.jar (framework)
+              val stdlibCandidate = listOfNotNull(
+                  classpathJars.firstOrNull { it.name.startsWith("kotlin-stdlib") && !it.name.contains("sources") },
+                  File(ctx.workDir, "kotlin-home/lib/kotlin-stdlib.jar"),
+                  File(ctx.config.appCacheDir, "kotlin-stdlib.jar"),
+                  File(ctx.config.appCacheDir, "kotlin-stdlib-1.9.24.jar"),
+                  File("/data/data/com.termux/files/usr/opt/kotlin/lib/kotlin-stdlib.jar")
+              ).firstOrNull { it.exists() && it.length() > 10_000L }
+
+              if (stdlibCandidate != null) {
+                  ctx.log(LogLevel.INFO, "D8", "Incluyendo stdlib en dex: ${stdlibCandidate.name} (${stdlibCandidate.length()}B)")
+                  var stdlibClassesAdded = 0
+                  ZipInputStream(stdlibCandidate.inputStream().buffered(32768)).use { zis ->
+                      while (true) {
+                          ctx.checkCancelled()
+                          val entry = zis.nextEntry ?: break
+                          if (!entry.isDirectory && entry.name.endsWith(".class") && !entry.name.endsWith("module-info.class") && !entry.name.contains("/module-info.class")) {
+                              val bytes = zis.readBytes()
+                              if (bytes.size >= 4) {
+                                  builder.addClassProgramData(bytes, Origin.root())
+                                  stdlibClassesAdded++
+                              }
+                          }
+                          zis.closeEntry()
+                      }
+                  }
+                  ctx.log(LogLevel.INFO, "D8", "Anadidas $stdlibClassesAdded clases de stdlib al programa DEX")
+              } else {
+                  ctx.log(LogLevel.WARNING, "D8", "No se encontro kotlin-stdlib.jar para incluir en DEX")
+              }
+
+              // Library files: android.jar (framework)
             val androidJar = ctx.config.androidJar
             if (androidJar.exists()) {
                 builder.addLibraryFiles(androidJar.toPath())

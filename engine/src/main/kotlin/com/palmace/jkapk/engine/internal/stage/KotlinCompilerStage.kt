@@ -25,6 +25,12 @@ internal class KotlinCompilerStage : BuildStageExecutor<ResolvedClasspath, Resol
         ctx.checkCancelled()
 
         val kotlinFiles = collectFiles(ctx.config.kotlinSourceDirs, "kt")
+        val generatedRDirs = listOfNotNull(
+            input.generatedJavaDir?.takeIf { it.exists() },
+            File(ctx.workDir, "generated/source/r").takeIf { it.exists() }
+        ).distinctBy { it.absolutePath }
+        val rJavaFiles = collectFiles(generatedRDirs, "java")
+        val generatedRKt = generateRKotlinSource(rJavaFiles, File(ctx.workDir, "generated/source/r_kt/GeneratedR.kt"), ctx)
         val javaFilesForSymbols = collectFiles(ctx.config.javaSourceDirs, "java")
 
         if (kotlinFiles.isEmpty()) {
@@ -55,7 +61,12 @@ var stdlibJar = candidateStdlibFiles.firstOrNull()
 if (stdlibJar == null) {
     try {
         val appCls = Class.forName("com.palmace.jkapk.app.JkapkApplication")
-        val appInst = appCls.getMethod("getInstance").invoke(null)
+        val appInst = try {
+                    appCls.getMethod("getInstance").invoke(null)
+                } catch (_: Throwable) {
+                    val comp = appCls.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+                    comp.javaClass.getMethod("getInstance").invoke(comp)
+                }
         val assetsObj = appCls.getMethod("getAssets").invoke(appInst)
         val openMethod = assetsObj.javaClass.getMethod("open", String::class.java)
         val assetNames = listOf("kotlin-stdlib.jar", "kotlin-stdlib-1.9.24.jar", "kotlin-stdlib-2.4.21.jar")
@@ -76,10 +87,16 @@ if (stdlibJar == null) {
     } catch (_: Throwable) {
     }
 }
+if (stdlibJar == null) {
+    stdlibJar = listOfNotNull(
+        ctx.cacheDir.takeIf { it.exists() }?.walkTopDown()?.firstOrNull { it.name.contains("kotlin-stdlib") && it.name.endsWith(".jar") && it.length() > 10_000L },
+        ctx.config.appCacheDir.takeIf { it.exists() }?.walkTopDown()?.firstOrNull { it.name.contains("kotlin-stdlib") && it.name.endsWith(".jar") && it.length() > 10_000L }
+    ).firstOrNull()
+}
 ctx.log(
     LogLevel.INFO,
     "KotlinCompiler",
-    "stdlibJar=${stdlibJar?.absolutePath ?: "NONE"} (${stdlibJar?.length() ?: 0L}B), androidJar=${ctx.config.androidJar.absolutePath} (${ctx.config.androidJar.length()}B)"
+    "stdlibJar=${stdlibJar?.absolutePath ?: "NONE"} (${stdlibJar?.length() ?: 0L}B), inputJars=${input.jars.size}, androidJar=${ctx.config.androidJar.absolutePath} (${ctx.config.androidJar.length()}B)"
 )
 
 val baseJars = if (stdlibJar != null && stdlibJar !in input.jars) {
@@ -94,8 +111,9 @@ val allJars = if (androidJarFile.exists() && androidJarFile.length() > 0L && and
     baseJars
 }
 
-val classpath = allJars.joinToString(File.pathSeparator) { it.absolutePath }
-        val allSources = kotlinFiles + javaFilesForSymbols
+ctx.log(LogLevel.INFO, "KotlinCompiler", "Classpath: " + allJars.joinToString(":") { it.name })
+        val classpath = allJars.joinToString(File.pathSeparator) { it.absolutePath }
+        val allSources = kotlinFiles + javaFilesForSymbols + listOfNotNull(generatedRKt)
 
         val kotlinHomeDir = File(ctx.workDir, "kotlin-home").apply {
             File(this, "lib").mkdirs()
@@ -206,11 +224,17 @@ val classpath = allJars.joinToString(File.pathSeparator) { it.absolutePath }
         }
 
         System.setProperty("jkapk.compiler.jar", compilerJar.absolutePath)
+        val prevContextLoader = Thread.currentThread().contextClassLoader
         val exitCode = try {
+            val loaderUrls = buildList {
+                stdlibJar?.takeIf { it.exists() && it.length() > 0L }?.let { add(it.toURI().toURL()) }
+                add(compilerJar.toURI().toURL())
+            }.toTypedArray()
             val classLoader = java.net.URLClassLoader(
-                arrayOf(compilerJar.toURI().toURL()),
+                loaderUrls,
                 this::class.java.classLoader
             )
+            Thread.currentThread().contextClassLoader = classLoader
             val compilerClass = classLoader.loadClass("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler")
             val compiler = compilerClass.getDeclaredConstructor().newInstance()
             val execMethod = compilerClass.getMethod(
@@ -231,6 +255,7 @@ val classpath = allJars.joinToString(File.pathSeparator) { it.absolutePath }
             ctx.diagnostic(diag)
             throw KotlinCompilationException("Kotlin fallo con excepcion", listOf(diag))
         } finally {
+            Thread.currentThread().contextClassLoader = prevContextLoader
             errStream.flush()
         }
 
@@ -335,3 +360,73 @@ internal class KotlinCompilationException(
     message: String,
     val diagnostics: List<BuildDiagnostic>
 ) : Exception(message)
+
+
+// Genera un JAR con clases .class para R y sus clases internas (R$id, R$layout, R$string, etc.)
+// evitando que K2JVMCompiler con -no-jdk falle con 'unresolved supertypes: Object' en R.java.
+private fun generateRKotlinSource(rJavaFiles: List<File>, outKt: File, ctx: BuildContext): File? {
+    if (rJavaFiles.isEmpty()) {
+        ctx.log(LogLevel.INFO, "KotlinCompiler", "rJavaFiles vacio, omitiendo GeneratedR.kt")
+        return null
+    }
+    return try {
+        val pkgRegex = Regex("""^\s*package\s+([a-zA-Z0-9_.]+)\s*;""", RegexOption.MULTILINE)
+        val innerStartRegex = Regex("""public\s+static\s+(?:final\s+)?class\s+([a-zA-Z0-9_]+)\s*\{""")
+        val intConstRegex = Regex("""public\s+static\s+(?:final\s+)?int\s+([a-zA-Z0-9_]+)\s*=\s*(-?0x[0-9a-fA-F]+|-?\d+)\s*;""")
+
+        val sb = StringBuilder()
+        var addedAny = false
+
+        for (rFile in rJavaFiles) {
+            val content = rFile.readText(charset = Charsets.UTF_8)
+            val pkg = pkgRegex.find(content)?.groupValues?.get(1) ?: ctx.config.packageName
+            val innerMatches = innerStartRegex.findAll(content).toList()
+            if (innerMatches.isEmpty()) continue
+
+            sb.append("package ").append(pkg).append("\n\n")
+            sb.append("object R {\n")
+
+            for ((i, match) in innerMatches.withIndex()) {
+                val innerName = match.groupValues[1]
+                val blockStart = match.range.last + 1
+                val blockEnd = if (i + 1 < innerMatches.size) innerMatches[i + 1].range.first else content.length
+                val block = content.substring(blockStart, blockEnd)
+
+                sb.append("    object ").append(innerName).append(" {\n")
+                for (fm in intConstRegex.findAll(block)) {
+                    val fName = fm.groupValues[1]
+                    val rawVal = fm.groupValues[2]
+                    val parsedVal = try {
+                        if (rawVal.startsWith("0x", ignoreCase = true)) {
+                            java.lang.Long.decode(rawVal).toInt()
+                        } else if (rawVal.startsWith("-0x", ignoreCase = true)) {
+                            -java.lang.Long.decode(rawVal.replaceFirst("-", "")).toInt()
+                        } else {
+                            rawVal.toInt()
+                        }
+                    } catch (_: Throwable) {
+                        0
+                    }
+                    sb.append("        const val ").append(fName).append(": Int = ").append(parsedVal).append("\n")
+                }
+                sb.append("    }\n")
+            }
+
+            sb.append("}\n\n")
+            addedAny = true
+        }
+
+        if (!addedAny) {
+            ctx.log(LogLevel.WARNING, "KotlinCompiler", "No se encontraron clases internas en R.java")
+            return null
+        }
+
+        outKt.parentFile?.mkdirs()
+        outKt.writeText(sb.toString(), charset = Charsets.UTF_8)
+        ctx.log(LogLevel.INFO, "KotlinCompiler", "Generado GeneratedR.kt (${outKt.length()}B)")
+        outKt
+    } catch (t: Throwable) {
+        ctx.log(LogLevel.WARNING, "KotlinCompiler", "Error generando GeneratedR.kt: ${t.message}")
+        null
+    }
+}

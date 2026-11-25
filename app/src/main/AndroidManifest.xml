@@ -32,6 +32,12 @@
             android:name=".build.BuildService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
-</application>
+        <provider
+            android:name=".ApkStreamProvider"
+            android:authorities="com.palmace.jkapk.app.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+    </application>
 
 </manifest>

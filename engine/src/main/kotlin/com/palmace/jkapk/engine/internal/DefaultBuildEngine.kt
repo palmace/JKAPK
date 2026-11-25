@@ -72,8 +72,16 @@ internal class DefaultBuildEngine(
 
         return try {
             pipeline.execute(config, ctx)
-
+            val signedSlug = config.projectName.lowercase().replace("\\s+".toRegex(), "-")
+            val signedCandidates = listOf(
+                File(workDir, "signed/$signedSlug-signed.apk"),
+                File(workDir, "signed/${config.projectName}-signed.apk")
+            ) + (File(workDir, "signed").listFiles()?.filter { it.isFile && it.extension == "apk" }.orEmpty())
+            val signedFile = signedCandidates.firstOrNull { it.exists() && it.length() > 0L }
             val apkPath = File(workDir, "${config.projectName}.apk")
+            if (signedFile != null && signedFile.absolutePath != apkPath.absolutePath) {
+                signedFile.copyTo(apkPath, overwrite = true)
+            }
             val duration = System.currentTimeMillis() - start
             _state.value = BuildState.Success(apkPath, duration, diagnostics.toList())
             BuildResult(

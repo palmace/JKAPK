@@ -142,18 +142,52 @@ internal class SignStage : BuildStageExecutor<ResolvedClasspath, ResolvedClasspa
 
     private fun ensureDebugKeystore(cacheDir: File): File {
         val outFile = File(cacheDir, "debug.keystore")
-        if (outFile.exists() && outFile.length() > 0) return outFile
+        if (outFile.exists() && outFile.length() > 0L) return outFile
+        if (outFile.exists()) outFile.delete()
 
-        val resourceStream = javaClass.getResourceAsStream("/debug.keystore")
-            ?: throw IllegalStateException("Recurso /debug.keystore no encontrado en el classpath")
+        val stream: java.io.InputStream? =
+            javaClass.getResourceAsStream("/debug.keystore")
+                ?: javaClass.classLoader?.getResourceAsStream("debug.keystore")
+                ?: openDebugKeystoreFromAssets()
+
+        val inputStream = stream
+            ?: throw IllegalStateException("Recurso /debug.keystore no encontrado en classpath ni en assets")
 
         cacheDir.mkdirs()
-        resourceStream.use { input ->
-            outFile.outputStream().use { output ->
-                input.copyTo(output)
+        val tmpFile = File(cacheDir, "debug.keystore.tmp")
+        if (tmpFile.exists()) tmpFile.delete()
+        inputStream.use { input ->
+            tmpFile.outputStream().buffered(16384).use { output ->
+                input.copyTo(output, bufferSize = 16384)
+                output.flush()
             }
         }
+        if (tmpFile.length() <= 0L) {
+            tmpFile.delete()
+            throw IllegalStateException("Recurso debug.keystore extraido vacio (0 bytes)")
+        }
+        if (!tmpFile.renameTo(outFile)) {
+            tmpFile.copyTo(outFile, overwrite = true)
+            tmpFile.delete()
+        }
         return outFile
+    }
+
+    private fun openDebugKeystoreFromAssets(): java.io.InputStream? {
+        return try {
+            val appCls = Class.forName("com.palmace.jkapk.app.JkapkApplication")
+            val appInst = try {
+                appCls.getMethod("getInstance").invoke(null)
+            } catch (_: Throwable) {
+                val comp = appCls.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+                comp.javaClass.getMethod("getInstance").invoke(comp)
+            }
+            val assetsObj = appCls.getMethod("getAssets").invoke(appInst)
+            val openMethod = assetsObj.javaClass.getMethod("open", String::class.java)
+            openMethod.invoke(assetsObj, "debug.keystore") as? java.io.InputStream
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     companion object {
